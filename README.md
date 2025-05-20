@@ -18,8 +18,8 @@ This document explains how to install dependencies, train the model, and run pre
 ## Installation  
 1. **Clone the repository**  
    ```bash
-   git clone https://github.com/yourusername/coin-classifier.git
-   cd coin-classifier
+   git clone https://github.com/NtetheWonder/South-African-Bank-Coin-Recognition-System
+   cd South-African-Bank-Coin-Recognition-System
 
 python -m venv venv
 source venv/bin/activate    # On Windows: venv\Scripts\activate
