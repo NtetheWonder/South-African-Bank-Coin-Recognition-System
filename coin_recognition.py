@@ -1,148 +1,192 @@
+import os
 import cv2
 import numpy as np
-import os
-from sklearn.svm import SVC
+import logging
+from skimage.feature import local_binary_pattern
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
-from skimage.feature import local_binary_pattern
-from skimage.color import rgb2gray
-import matplotlib.pyplot as plt
 
-# Constants for LBP
+# ------------------------------
+# Configuration
+# ------------------------------
+CLASS_LABELS = ['5c', '10c', '20c', '50c', 'R1', 'R2', 'R5']
+DATASET_PATH = "dataset"
+TEST_IMAGE_PATH = "test_images/10c_O.png"
 LBP_RADIUS = 1
 LBP_N_POINTS = 8 * LBP_RADIUS
 LBP_METHOD = 'uniform'
+DEBUG = False
 
-def preprocess_image(image):
-    #Convert image to grayscale and apply Gaussian blur.
+# ------------------------------
+# Logging Setup
+# ------------------------------
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+# ------------------------------
+# Preprocessing
+# ------------------------------
+def preprocess_image(image: np.ndarray) -> np.ndarray:
+    """
+    Convert to grayscale, normalize lighting, and remove noise.
+    """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    # cv2.imshow("Blur", blur)
+    norm = cv2.equalizeHist(gray)
+    blur = cv2.medianBlur(norm, 5)
     return blur
 
-def segment_coin(image):
-    # Segment the coin from the background.
-    _, thresh = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    # Find contours
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
-    
-    # Assume the largest contour is the coin
-    coin_contour = max(contours, key=cv2.contourArea)
-    # Create mask
+# ------------------------------
+# Segmentation
+# ------------------------------
+def segment_coin(image: np.ndarray) -> np.ndarray:
+    """
+    Detect circular coin region using Hough Transform and return mask.
+    """
+    circles = cv2.HoughCircles(
+        image,
+        cv2.HOUGH_GRADIENT,
+        dp=1.2,
+        minDist=50,
+        param1=100,
+        param2=30,
+        minRadius=30,
+        maxRadius=150
+    )
     mask = np.zeros_like(image)
-    cv2.drawContours(mask, [coin_contour], -1, 255, -1)
-    return mask
+    if circles is not None:
+        x, y, r = np.uint16(circles[0][0])
+        cv2.circle(mask, (x, y), r, 255, -1)
+    return mask if mask.sum() > 0 else None
 
-def extract_features(image, mask):
-    # Extract Hu Moments, color histogram, and LBP features.
+# ------------------------------
+# Feature Extraction
+# ------------------------------
+def extract_shape_features(mask: np.ndarray) -> np.ndarray:
+    """
+    Compute aspect ratio and extent from the largest contour.
+    """
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return np.array([0.0, 0.0])
+    cnt = max(contours, key=cv2.contourArea)
+    x, y, w, h = cv2.boundingRect(cnt)
+    aspect_ratio = float(w) / h
+    extent = cv2.contourArea(cnt) / (w * h)
+    return np.array([aspect_ratio, extent])
+
+
+def extract_features(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """
+    Extract Hu Moments, color histogram, LBP, and shape features.
+    """
     # Apply mask
-    masked_image = cv2.bitwise_and(image, image, mask=mask)
-    # Convert to grayscale
-    gray = cv2.cvtColor(masked_image, cv2.COLOR_BGR2GRAY)
-    # cv2.imshow("Musked",masked_image)
-    # cv2.imshow("Gray", gray)
-    # Compute Hu Moments
-    moments = cv2.moments(mask)
-    hu_moments = cv2.HuMoments(moments).flatten()
-    # Compute color histogram
-    hist = cv2.calcHist([masked_image], [0, 1, 2], mask, [8, 8, 8],
-                        [0, 256, 0, 256, 0, 256])
-    hist = cv2.normalize(hist, hist).flatten()
-    # Compute LBP
-    # gray_float = gray.astype('float') / 255.0
-    # gray_normalized = gray/255
+    masked = cv2.bitwise_and(image, image, mask=mask)
+    gray = cv2.cvtColor(masked, cv2.COLOR_BGR2GRAY)
 
+    # Hu Moments
+    moments = cv2.moments(mask)
+    hu = cv2.HuMoments(moments).flatten()
+
+    # Color histogram
+    hist = cv2.calcHist([masked], [0, 1, 2], mask, [8, 8, 8], [0, 256]*3)
+    hist = cv2.normalize(hist, hist).flatten()
+
+    # LBP histogram
     lbp = local_binary_pattern(gray, LBP_N_POINTS, LBP_RADIUS, LBP_METHOD)
-    (hist_lbp, _) = np.histogram(lbp.ravel(),
-                                 bins=np.arange(0, LBP_N_POINTS + 3),
-                                 range=(0, LBP_N_POINTS + 2))
-    hist_lbp = hist_lbp.astype("float")
+    (hist_lbp, _) = np.histogram(
+        lbp.ravel(),
+        bins=np.arange(0, LBP_N_POINTS + 3),
+        range=(0, LBP_N_POINTS + 2)
+    )
+    hist_lbp = hist_lbp.astype('float')
     hist_lbp /= (hist_lbp.sum() + 1e-7)
 
-    # Concatenate features
-    features = np.hstack([hu_moments, hist, hist_lbp])
-    return features
+    # Shape features
+    shape_feats = extract_shape_features(mask)
 
-def load_dataset(dataset_path):
-    # Load images and extract features and labels.
-    features = []
-    labels = []
-    for label in os.listdir(dataset_path):
-        label_path = os.path.join(dataset_path, label)
-        if not os.path.isdir(label_path):
+    # Debug display
+    if DEBUG:
+        cv2.imshow("Masked", masked)
+        cv2.waitKey(0)
+
+    return np.hstack([hu, hist, hist_lbp, shape_feats])
+
+# ------------------------------
+# Dataset Loading
+# ------------------------------
+def load_dataset(path: str):
+    X, y = [], []
+    for label in os.listdir(path):
+        lab_dir = os.path.join(path, label)
+        if not os.path.isdir(lab_dir):
             continue
-        for filename in os.listdir(label_path):
-            file_path = os.path.join(label_path, filename)
-            image = cv2.imread(file_path)
-            if image is None:
+        for fname in os.listdir(lab_dir):
+            img = cv2.imread(os.path.join(lab_dir, fname))
+            if img is None:
                 continue
-
-            preprocessed = preprocess_image(image)
-            mask = segment_coin(preprocessed)
-
+            proc = preprocess_image(img)
+            mask = segment_coin(proc)
             if mask is None:
                 continue
+            feats = extract_features(img, mask)
+            X.append(feats)
+            y.append(label)
+    return np.array(X), np.array(y)
 
-            feat = extract_features(image, mask)
-            features.append(feat)
-            labels.append(label)
-    return np.array(features), np.array(labels)
+# ------------------------------
+# Training & Evaluation
+# ------------------------------
+def train_and_evaluate(X, y):
+    # Stratified train-test split
+    split = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+    for tr_idx, te_idx in split.split(X, y):
+        X_train, X_test = X[tr_idx], X[te_idx]
+        y_train, y_test = y[tr_idx], y[te_idx]
 
-def train_classifier(X, y):
-    #Train an SVM classifier.
-    model = make_pipeline(StandardScaler(), SVC(kernel='linear', probability=True))
-    model.fit(X, y)
+    # Model pipeline
+    model = make_pipeline(StandardScaler(), RandomForestClassifier(n_estimators=100, random_state=42))
+    model.fit(X_train, y_train)
+
+    # Report
+    preds = model.predict(X_test)
+    report = classification_report(y_test, preds, labels=CLASS_LABELS, target_names=CLASS_LABELS, zero_division=0)
+    logging.info("Classification Report:\n%s", report)
     return model
 
-def evaluate_model(model, X_test, y_test):
-   # Evaluate the trained model.
-    y_pred = model.predict(X_test)
-    all_labels = ['5c','10c','20c','50c','R1','R2','R5']
-    print(classification_report(y_test, y_pred, labels= all_labels, target_names= all_labels, zero_division=0))
-
-def predict_image(model, image_path):
-    # Predict the class of a single image.
-    image = cv2.imread(image_path)
-    if image is None:
-        print(f"Failed to load image: {image_path}")
+# ------------------------------
+# Prediction on New Image
+# ------------------------------
+def predict_image(model, image_path: str):
+    img = cv2.imread(image_path)
+    if img is None:
+        logging.error("Failed to load image: %s", image_path)
         return
-    
-    preprocessed = preprocess_image(image)
-    mask = segment_coin(preprocessed)
-    
+    proc = preprocess_image(img)
+    mask = segment_coin(proc)
     if mask is None:
-        print("No coin detected.")
+        logging.warning("No coin detected in %s", image_path)
         return
-    
-    feat = extract_features(image, mask).reshape(1, -1)
-    prediction = model.predict(feat)[0]
-    probability = model.predict_proba(feat).max()
-    print(f"Predicted: {prediction} ({probability * 100:.2f}%)")
-    # Display the image with prediction
-
-    cv2.putText(image, f"{prediction} ({probability * 100:.2f}%)", (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-    cv2.imshow("Prediction", image)
+    feat = extract_features(img, mask).reshape(1, -1)
+    pred = model.predict(feat)[0]
+    prob = model.predict_proba(feat).max()
+    logging.info("Predicted: %s (%.2f%%)", pred, prob*100)
+    cv2.putText(img, f"{pred} ({prob*100:.1f}%)", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
+    cv2.imshow("Prediction", img)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
+# ------------------------------
+# Main
+# ------------------------------
 def main():
-    dataset_path = "dataset"
-    test_image_path = "test_images/images1.jpg"  # Replace with your test image
-    print("Loading dataset…")
-    X, y = load_dataset(dataset_path)
-    print(f"Dataset loaded: {len(X)} samples.")
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    print("Training classifier…")
-    model = train_classifier(X_train, y_train)
-    print("Evaluating model…")
-    evaluate_model(model, X_test, y_test)
-    print("Predicting on a new image…")
-    predict_image(model, test_image_path)
+    logging.info("Loading dataset from %s...", DATASET_PATH)
+    X, y = load_dataset(DATASET_PATH)
+    logging.info("Loaded %d samples.", len(X))
+    model = train_and_evaluate(X, y)
+    logging.info("Predicting on new image: %s", TEST_IMAGE_PATH)
+    predict_image(model, TEST_IMAGE_PATH)
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
