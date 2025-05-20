@@ -1,7 +1,5 @@
 # South-African-Bank-Coin-Recognition-System
 
-# Coin Classifier Help
-
 This document explains how to install dependencies, train the model, and run predictions—including selecting your own images—on the South African coin classification pipeline.
 
 ---
