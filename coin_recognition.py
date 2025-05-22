@@ -14,10 +14,11 @@ from sklearn.metrics import classification_report
 # ------------------------------
 CLASS_LABELS = ['5c', '10c', '20c', '50c', 'R1', 'R2', 'R5']
 DATASET_PATH = "dataset"
-TEST_IMAGE_PATH = "test_images/10c_O.png"
-LBP_RADIUS = 1
+TEST_IMAGE_PATH = "test_images/images1.jpg"
+LBP_RADIUS = 3
 LBP_N_POINTS = 8 * LBP_RADIUS
 LBP_METHOD = 'uniform'
+
 DEBUG = False
 
 # ------------------------------
@@ -34,7 +35,8 @@ def preprocess_image(image: np.ndarray) -> np.ndarray:
     """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     norm = cv2.equalizeHist(gray)
-    blur = cv2.medianBlur(norm, 5)
+    mid = cv2.medianBlur(norm, 5)
+    blur = cv2.GaussianBlur(mid, (5,5),0)
     return blur
 
 # ------------------------------
@@ -59,6 +61,7 @@ def segment_coin(image: np.ndarray) -> np.ndarray:
         x, y, r = np.uint16(circles[0][0])
         cv2.circle(mask, (x, y), r, 255, -1)
     return mask if mask.sum() > 0 else None
+
 
 # ------------------------------
 # Feature Extraction
