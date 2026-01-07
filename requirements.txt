@@ -4,3 +4,5 @@ scikit-image
 numpy
 matplotlib
 seaborn
+streamlit
+
